@@ -1,0 +1,9 @@
+node_modules
+dist
+coverage
+logs
+.env
+.env.*
+.wrangler
+*.tgz
+.DS_Store

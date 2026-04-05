@@ -1,0 +1,362 @@
+import { billingPeriodRemainderSeconds, sendAlerts } from "./alerts";
+import { fetchUsage, getBillingPeriod } from "./query";
+import { evaluateThresholds, isOverThreshold, isTrippable } from "./thresholds";
+import {
+	ALERT_LEVELS,
+	type AlertLevel,
+	type EvaluateEvent,
+	type GuardState,
+	RESOURCES,
+	type ResolvedConfig,
+	type ResourceName,
+	type ResourceStatus,
+	TRANSITIONS,
+	TRIP_REASONS,
+	type Transition,
+	type TripReason,
+	type UsageGuard,
+	type UsageGuardConfig,
+} from "./types";
+import { validateAndResolve } from "./validation";
+
+export function createUsageGuard(config: UsageGuardConfig): UsageGuard {
+	const resolved = validateAndResolve(config);
+	return new UsageGuardImpl(resolved);
+}
+
+class UsageGuardImpl implements UsageGuard {
+	private config: ResolvedConfig;
+	readonly kv: KVNamespace;
+
+	constructor(config: ResolvedConfig) {
+		this.config = config;
+		this.kv = config.kv;
+	}
+
+	async isTripped(resource?: ResourceName): Promise<boolean> {
+		if (this.config.dryRun) return false;
+
+		let state: GuardState | null = null;
+		try {
+			const stateRaw = await this.config.kv.get(this.stateKey());
+			if (stateRaw) state = JSON.parse(stateRaw) as GuardState;
+		} catch {
+			this.config.logger.warn("KV read failed for state key");
+		}
+
+		if (resource) {
+			if (state) {
+				const rs = state.resources.find((r) => r.name === resource);
+				if (rs) return this.isResourceTripped(rs);
+			}
+			return this.isSafetyNetTripped(resource);
+		}
+
+		if (state?.tripped) return true;
+
+		try {
+			const tripped = await this.config.kv.get(this.trippedKey());
+			if (tripped) return true;
+		} catch {
+			this.config.logger.warn("KV read failed for tripped key");
+		}
+
+		return false;
+	}
+
+	async trippedResources(): Promise<ResourceName[]> {
+		let state: GuardState | null = null;
+		try {
+			const raw = await this.config.kv.get(this.stateKey());
+			if (raw) state = JSON.parse(raw) as GuardState;
+		} catch {
+			this.config.logger.warn("KV read failed for trippedResources");
+		}
+
+		if (state) {
+			const result: ResourceName[] = [];
+			for (const rs of state.resources) {
+				if (this.isResourceTripped(rs)) {
+					result.push(rs.name);
+				}
+			}
+			return result;
+		}
+
+		try {
+			const tripped = await this.config.kv.get(this.trippedKey());
+			if (tripped) {
+				return Object.values(RESOURCES).filter((name) => isTrippable(this.config.thresholds[name]));
+			}
+		} catch {
+			this.config.logger.warn("KV read failed for tripped key in trippedResources");
+		}
+
+		return [];
+	}
+
+	private async isSafetyNetTripped(resource: ResourceName): Promise<boolean> {
+		if (!isTrippable(this.config.thresholds[resource])) return false;
+		try {
+			const tripped = await this.config.kv.get(this.trippedKey());
+			if (tripped) return true;
+		} catch {
+			this.config.logger.warn("KV read failed for tripped key");
+		}
+		return false;
+	}
+
+	async evaluate(): Promise<void> {
+		const now = new Date();
+
+		let currentState: GuardState | null = null;
+		try {
+			const raw = await this.config.kv.get(this.stateKey());
+			if (raw) currentState = JSON.parse(raw) as GuardState;
+		} catch {
+			this.config.logger.warn("KV read failed for state during evaluate");
+		}
+
+		if (!currentState) {
+			try {
+				const trippedVal = await this.config.kv.get(this.trippedKey());
+				if (trippedVal) {
+					currentState = {
+						version: 1,
+						tripped: true,
+						trippedAt: trippedVal,
+						tripReason: TRIP_REASONS.THRESHOLD,
+						manualTripReason: null,
+						resources: [],
+						lastCheckAt: trippedVal,
+					};
+					this.config.logger.debug("Reconciled state from tripped safety net key");
+				}
+			} catch {
+				this.config.logger.warn("KV read failed for tripped key during evaluate reconciliation");
+			}
+		}
+
+		let resources: ResourceStatus[];
+		try {
+			const usage = await fetchUsage(this.config, now);
+			resources = usage.resources;
+		} catch (err) {
+			this.config.logger.error("CF API query failed, maintaining cached state", {
+				error: String(err),
+			});
+			return;
+		}
+
+		const result = evaluateThresholds(resources, this.config, currentState);
+		const period = getBillingPeriod(this.config.billingDay, now);
+		let transitioned: Transition | null = null;
+
+		if (this.config.dryRun) {
+			if (result.shouldTrip) transitioned = TRANSITIONS.TRIP;
+			else if (result.shouldRecover) transitioned = TRANSITIONS.RECOVER;
+			await this.fireDryRunOnEvaluate(resources, period, now, transitioned, currentState);
+			return;
+		}
+
+		if (result.shouldTrip) {
+			await this.tripInternal(TRIP_REASONS.THRESHOLD, null, resources, now);
+			await this.alert(ALERT_LEVELS.TRIP, result.tripResources, period, now);
+			transitioned = TRANSITIONS.TRIP;
+		} else if (result.shouldRecover) {
+			await this.recoverInternal(resources, now);
+			await this.alert(ALERT_LEVELS.RECOVER, resources, period, now);
+			transitioned = TRANSITIONS.RECOVER;
+		} else {
+			await this.saveState(
+				currentState?.tripped ?? false,
+				currentState?.trippedAt ?? null,
+				currentState?.tripReason ?? null,
+				currentState?.manualTripReason ?? null,
+				resources,
+				now,
+			);
+		}
+
+		if (result.warnResources.length > 0 && !result.shouldTrip) {
+			for (const resource of result.warnResources) {
+				await this.alert(ALERT_LEVELS.WARN, [resource], period, now);
+			}
+		}
+
+		await this.fireOnEvaluate(resources, period, now, transitioned);
+	}
+
+	async getState(): Promise<GuardState | null> {
+		try {
+			const raw = await this.config.kv.get(this.stateKey());
+			if (!raw) return null;
+			return JSON.parse(raw) as GuardState;
+		} catch {
+			this.config.logger.warn("KV read failed for getState");
+			return null;
+		}
+	}
+
+	async trip(reason?: string): Promise<void> {
+		const now = new Date();
+		const currentState = await this.getState();
+		await this.tripInternal(
+			TRIP_REASONS.MANUAL,
+			reason ?? null,
+			currentState?.resources ?? [],
+			now,
+		);
+		this.config.logger.debug("Guard manually tripped", { reason });
+	}
+
+	async reset(): Promise<void> {
+		const now = new Date();
+		const currentState = await this.getState();
+		await this.recoverInternal(currentState?.resources ?? [], now);
+		this.config.logger.debug("Guard manually reset");
+	}
+
+	private async tripInternal(
+		tripReason: TripReason,
+		manualTripReason: string | null,
+		resources: ResourceStatus[],
+		now: Date,
+	): Promise<void> {
+		await this.saveState(true, now.toISOString(), tripReason, manualTripReason, resources, now);
+
+		const ttl = billingPeriodRemainderSeconds(this.config.billingDay, now);
+		try {
+			await this.config.kv.put(this.trippedKey(), now.toISOString(), {
+				expirationTtl: Math.max(60, ttl),
+			});
+		} catch {
+			this.config.logger.warn("KV write failed for tripped safety net key");
+		}
+	}
+
+	private async recoverInternal(resources: ResourceStatus[], now: Date): Promise<void> {
+		await this.saveState(false, null, null, null, resources, now);
+
+		try {
+			await this.config.kv.delete(this.trippedKey());
+		} catch {
+			this.config.logger.warn("KV delete failed for tripped key during recovery");
+		}
+	}
+
+	private async saveState(
+		tripped: boolean,
+		trippedAt: string | null,
+		tripReason: TripReason | null,
+		manualTripReason: string | null,
+		resources: ResourceStatus[],
+		now: Date,
+	): Promise<void> {
+		const state: GuardState = {
+			version: 1,
+			tripped,
+			trippedAt,
+			tripReason,
+			manualTripReason,
+			resources,
+			lastCheckAt: now.toISOString(),
+		};
+
+		try {
+			await this.config.kv.put(this.stateKey(), JSON.stringify(state));
+		} catch {
+			this.config.logger.warn("KV write failed for state");
+		}
+	}
+
+	private async alert(
+		level: AlertLevel,
+		resources: ResourceStatus[],
+		period: { start: string; end: string },
+		now: Date,
+	): Promise<void> {
+		await sendAlerts(
+			{
+				level,
+				resources,
+				accountId: this.config.accountId,
+				timestamp: now.toISOString(),
+				billingPeriod: period,
+			},
+			this.config,
+			now,
+		);
+	}
+
+	private async fireDryRunOnEvaluate(
+		resources: ResourceStatus[],
+		period: { start: string; end: string },
+		now: Date,
+		transitioned: Transition | null,
+		currentState: GuardState | null,
+	): Promise<void> {
+		if (!this.config.onEvaluate) return;
+
+		const wouldTrip = transitioned === TRANSITIONS.TRIP;
+		const state: GuardState = {
+			version: 1,
+			tripped: wouldTrip || (currentState?.tripped ?? false),
+			trippedAt: wouldTrip ? now.toISOString() : (currentState?.trippedAt ?? null),
+			tripReason: wouldTrip ? TRIP_REASONS.THRESHOLD : (currentState?.tripReason ?? null),
+			manualTripReason: currentState?.manualTripReason ?? null,
+			resources,
+			lastCheckAt: now.toISOString(),
+		};
+
+		if (transitioned === TRANSITIONS.RECOVER) {
+			state.tripped = false;
+			state.trippedAt = null;
+			state.tripReason = null;
+		}
+
+		const event: EvaluateEvent = { state, billingPeriod: period, transitioned };
+
+		try {
+			await this.config.onEvaluate(event);
+		} catch (err) {
+			this.config.logger.error("onEvaluate hook failed", {
+				error: String(err),
+			});
+		}
+	}
+
+	private async fireOnEvaluate(
+		resources: ResourceStatus[],
+		period: { start: string; end: string },
+		now: Date,
+		transitioned: Transition | null,
+	): Promise<void> {
+		if (!this.config.onEvaluate) return;
+
+		const state = await this.getState();
+		if (!state) return;
+
+		const event: EvaluateEvent = { state, billingPeriod: period, transitioned };
+
+		try {
+			await this.config.onEvaluate(event);
+		} catch (err) {
+			this.config.logger.error("onEvaluate hook failed", {
+				error: String(err),
+			});
+		}
+	}
+
+	private isResourceTripped(rs: ResourceStatus): boolean {
+		return isOverThreshold(rs, this.config.thresholds[rs.name]);
+	}
+
+	private stateKey(): string {
+		return `${this.config.keyPrefix}state:v1`;
+	}
+
+	private trippedKey(): string {
+		return `${this.config.keyPrefix}tripped`;
+	}
+}

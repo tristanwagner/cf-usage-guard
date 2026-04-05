@@ -1,0 +1,63 @@
+{
+	"name": "cf-usage-guard",
+	"version": "0.1.0",
+	"description": "Automatic usage protection for Cloudflare Workers. Monitors account-level resource consumption, trips a guard before you hit billing overages, and sends alerts via Discord/Slack/custom webhooks.",
+	"type": "module",
+	"main": "./dist/index.js",
+	"module": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": ["dist", "README.md", "LICENSE", "llms.txt"],
+	"scripts": {
+		"build": "tsc",
+		"check": "biome check src/",
+		"check:fix": "biome check --write src/",
+		"check-types": "tsc --noEmit",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"prepublishOnly": "npm run check-types && npm run test && npm run build"
+	},
+	"keywords": [
+		"cloudflare",
+		"workers",
+		"usage",
+		"guard",
+		"circuit-breaker",
+		"cost-protection",
+		"billing",
+		"kv",
+		"d1",
+		"r2",
+		"queues",
+		"overage",
+		"alerts",
+		"discord",
+		"slack"
+	],
+	"author": "https://github.com/tristanwagner",
+	"sideEffects": false,
+	"engines": {
+		"node": ">=18"
+	},
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/tristanwagner/cf-usage-guard"
+	},
+	"bugs": {
+		"url": "https://github.com/tristanwagner/cf-usage-guard/issues"
+	},
+	"homepage": "https://github.com/tristanwagner/cf-usage-guard#readme",
+	"devDependencies": {
+		"@biomejs/biome": "^1.9.0",
+		"@cloudflare/workers-types": "^4.20250327.0",
+		"@vitest/coverage-v8": "^3.2.4",
+		"typescript": "^5.7.0",
+		"vitest": "^3.1.0"
+	}
+}

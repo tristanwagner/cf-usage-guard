@@ -1,0 +1,365 @@
+# cf-usage-guard
+
+Automatic usage protection for Cloudflare Workers. Monitors account-level resource consumption via the CF GraphQL Analytics API, circuit-breaks individual services before you hit billing overages, and sends alerts via Discord, Slack, or custom webhooks.
+
+Zero runtime dependencies. Works with the Cloudflare Workers Paid Plan ($5/mo).
+
+## Installation
+
+```bash
+npm install cf-usage-guard
+```
+
+## Agent Setup Guide
+
+When a user wants to add cf-usage-guard to their Cloudflare Worker, follow this interview flow to gather the information needed to generate a working configuration.
+
+### Step 1: Ask these questions
+
+1. **Which Cloudflare services does your Worker use?**
+   Options: KV, D1, R2, Queues, Durable Objects, Workers AI, Vectorize, Pages Functions, Stream
+   (This determines which proxy wrappers to set up and which thresholds matter.)
+
+2. **How do you want to handle tripped resources?**
+   - Tier 1 (Passive): Your code checks `isTripped()` and decides what to do
+   - Tier 2 (Active): Proxy wrappers automatically block operations when tripped
+   - Mix: Active for expensive resources (KV writes, R2 mutations), passive for the rest
+
+3. **Where should alerts go?**
+   Options: Discord webhook, Slack webhook, custom handler, or none for now
+
+4. **What cron schedule is the Worker already using, or should we add one?**
+   (The guard needs a cron like `*/5 * * * *` to call `evaluate()` periodically.)
+
+5. **Do you want to start in dry-run mode?**
+   (`dryRun: true` -- evaluates thresholds and fires onEvaluate but never trips or writes state. Good for testing thresholds before going live.)
+
+6. **Do you want to customize any thresholds?**
+   Defaults are conservative (trip at 90%, warn at 80%). The user may want to:
+   - Set dollar budgets: `maxOverageUsd: 5` on expensive resources
+   - Set absolute caps: `tripAt: 900_000` on KV writes
+   - Disable tripping for uncontrollable resources: `"workers-requests": { trip: null }`
+
+### Step 1b: Detect if they use Alchemy
+
+If the project has alchemy imports or an `alchemy.run.ts` / `alchemy.config.ts` file, they use [Alchemy](https://github.com/alchemy-run/alchemy) for infrastructure-as-code. In that case, generate the KV namespace and Worker bindings using Alchemy instead of manual wrangler.toml edits. See "Alchemy Setup" below.
+
+### Step 2: Prerequisites
+
+Before generating code, ensure the user has:
+
+1. **A KV namespace** for the guard's state storage. If they don't have one:
+   ```toml
+   # wrangler.toml
+   [[kv_namespaces]]
+   binding = "USAGE_GUARD_KV"
+   id = "<created-namespace-id>"
+   ```
+
+2. **A CF API token** with `Account Analytics: Read` permission.
+   Direct them to: https://dash.cloudflare.com/profile/api-tokens
+
+3. **Environment variables** in wrangler.toml or the dashboard:
+   - `CF_ACCOUNT_ID` -- their Cloudflare account ID
+   - `CF_API_TOKEN` -- the API token from above
+   - `DISCORD_WEBHOOK_URL` or `SLACK_WEBHOOK_URL` (if using alerts)
+
+4. **A cron trigger** in wrangler.toml:
+   ```toml
+   [triggers]
+   crons = ["*/5 * * * *"]
+   ```
+
+### Alchemy Setup (if applicable)
+
+If the user uses [Alchemy](https://github.com/alchemy-run/alchemy), provision the KV namespace and wire bindings in their alchemy config instead of editing wrangler.toml manually:
+
+```ts
+import { KVNamespace, Worker } from "alchemy/cloudflare";
+
+const guardKv = await KVNamespace("usage-guard-kv", {
+  title: "usage-guard-state",
+});
+
+const worker = await Worker("my-worker", {
+  entrypoint: "./src/worker.ts",
+  bindings: {
+    USAGE_GUARD_KV: guardKv,
+    CF_ACCOUNT_ID: alchemy.secret(process.env.CF_ACCOUNT_ID),
+    CF_API_TOKEN: alchemy.secret(process.env.CF_API_TOKEN),
+    DISCORD_WEBHOOK_URL: alchemy.secret(process.env.DISCORD_WEBHOOK_URL),
+    // ... user's other bindings (D1Database, R2Bucket, Queue, etc.)
+  },
+  crons: ["*/5 * * * *"],
+});
+```
+
+Alchemy handles namespace creation, binding wiring, and secret encryption. The Worker entrypoint code (using createUsageGuard/guardEnv) is the same regardless of whether you use Alchemy or wrangler.toml.
+
+### Step 3: Generate the configuration
+
+Based on the answers, generate one of the patterns below.
+
+#### Pattern A: Tier 1 (Passive) with withUsageGuard wrapper
+
+Best for simple Workers with a single scheduled handler.
+
+```ts
+import { withUsageGuard, RESOURCES } from "cf-usage-guard";
+import type { UsageGuard } from "cf-usage-guard";
+
+interface Env {
+  USAGE_GUARD_KV: KVNamespace;
+  CF_ACCOUNT_ID: string;
+  CF_API_TOKEN: string;
+  DISCORD_WEBHOOK_URL: string; // omit if no alerts
+  // ... user's other bindings
+}
+
+export default withUsageGuard<Env>(
+  {
+    kv: (env) => env.USAGE_GUARD_KV,
+    accountId: (env) => env.CF_ACCOUNT_ID,
+    apiToken: (env) => env.CF_API_TOKEN,
+    evaluateCron: "*/5 * * * *",
+    alerts: (env) => [{ type: "discord", url: env.DISCORD_WEBHOOK_URL }],
+    // dryRun: true, // uncomment to test without tripping
+  },
+  {
+    fetch(request, env, ctx) {
+      // user's fetch handler -- passed through untouched
+    },
+    scheduled(event, env, ctx) {
+      // only called when guard is NOT tripped
+      // user's cron logic here
+    },
+  },
+);
+```
+
+#### Pattern B: Tier 2 (Active) with guardEnv
+
+Best for Workers that use multiple CF bindings and want automatic protection.
+
+```ts
+import { createUsageGuard, guardEnv } from "cf-usage-guard";
+import type { UsageGuard } from "cf-usage-guard";
+
+interface Env {
+  USAGE_GUARD_KV: KVNamespace;
+  CF_ACCOUNT_ID: string;
+  CF_API_TOKEN: string;
+  DISCORD_WEBHOOK_URL: string;
+  MY_KV: KVNamespace;
+  MY_DB: D1Database;
+  MY_BUCKET: R2Bucket;
+  // ... other bindings
+}
+
+let guard: UsageGuard | null = null;
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    guard ??= createUsageGuard({
+      kv: env.USAGE_GUARD_KV,
+      accountId: env.CF_ACCOUNT_ID,
+      apiToken: env.CF_API_TOKEN,
+      alerts: [{ type: "discord", url: env.DISCORD_WEBHOOK_URL }],
+      // dryRun: true, // uncomment to test without tripping
+    });
+
+    // One line wraps all bindings -- guard's KV auto-excluded
+    env = guardEnv(env, guard);
+
+    // Existing code works unchanged -- calls throw UsageGuardError when tripped
+    await env.MY_KV.put("key", "value");
+    await env.MY_DB.prepare("SELECT 1").first();
+    await env.MY_BUCKET.put("file", data);
+  },
+
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    guard ??= createUsageGuard({ /* same config */ });
+
+    if (controller.cron === "*/5 * * * *") {
+      ctx.waitUntil(guard.evaluate());
+      return;
+    }
+
+    if (await guard.isTripped()) return;
+    // user's cron logic
+  },
+};
+```
+
+#### Pattern C: Per-binding wrapping (fine-grained control)
+
+Best when only some bindings need protection.
+
+```ts
+import { createUsageGuard, guardKV, guardD1, guardR2, guardQueue, guardAI, guardVectorize } from "cf-usage-guard";
+
+// Wrap only the bindings you want to protect:
+const kv = guardKV(env.MY_KV, guard);           // guards kv-reads, kv-writes, kv-deletes, kv-lists
+const db = guardD1(env.MY_DB, guard);            // guards d1-reads, d1-writes
+const bucket = guardR2(env.MY_BUCKET, guard);    // guards r2-class-a, r2-class-b
+const queue = guardQueue(env.MY_QUEUE, guard);   // guards queue-operations
+const ai = guardAI(env.AI, guard);               // guards ai-neurons
+const index = guardVectorize(env.MY_INDEX, guard); // guards vectorize-queries
+```
+
+### Step 4: Customize thresholds
+
+Only generate threshold overrides for services the user actually uses. Examples:
+
+```ts
+createUsageGuard({
+  // ...required config...
+  thresholds: {
+    // Dollar budget: trip when KV write overage exceeds $5
+    "kv-writes": { maxOverageUsd: 5 },
+
+    // Absolute cap: trip at 900K operations regardless of percentage
+    "queue-operations": { tripAt: 900_000 },
+
+    // Aggressive: trip earlier on expensive R2 mutations
+    "r2-class-a": { trip: 80, recover: 70 },
+
+    // Disable tripping for resources you can't control from app code
+    "workers-requests": { trip: null },
+
+    // Custom plan limits (if different from defaults)
+    "d1-reads": { limit: 50_000_000 },
+  },
+});
+```
+
+### Step 5: Handle UsageGuardError in Tier 2
+
+When using active proxies in "throw" mode (default), wrap calls in try/catch:
+
+```ts
+import { UsageGuardError } from "cf-usage-guard";
+
+try {
+  await env.MY_KV.put("key", "value");
+} catch (err) {
+  if (err instanceof UsageGuardError) {
+    // err.resource = "kv-writes", err.method = "put"
+    return new Response("Service temporarily unavailable", { status: 503 });
+  }
+  throw err;
+}
+```
+
+Or use "skip" mode to silently drop operations:
+
+```ts
+env = guardEnv(env, guard, { onTrip: "skip" });
+```
+
+## Default Thresholds Reference
+
+| Resource            | Monthly Limit | Trip % | Warn % | Overage $/M |
+| ------------------- | ------------- | ------ | ------ | ----------- |
+| workers-requests    | 10M           | 95     | 80     | $0.30       |
+| workers-cpu         | 30B us        | 95     | 80     | $0.02       |
+| kv-reads            | 10M           | 90     | 80     | $0.50       |
+| kv-writes           | 1M            | 90     | 80     | $5.00       |
+| kv-deletes          | 1M            | 90     | 80     | $5.00       |
+| kv-lists            | 1M            | 90     | 80     | $5.00       |
+| d1-reads            | 25M           | 90     | 80     | $0.001      |
+| d1-writes           | 50M           | 90     | 80     | $1.00       |
+| r2-class-a          | 1M            | 90     | 80     | $4.50       |
+| r2-class-b          | 10M           | 95     | 80     | $0.36       |
+| queue-operations    | 1M            | 90     | 80     | $0.40       |
+| do-requests         | 1M            | 90     | 80     | $0.15       |
+| do-wall-time        | 400B us       | 90     | 80     | $12.50      |
+| ai-neurons          | 10M           | 90     | 80     | $0.011      |
+| vectorize-queries   | 30M           | 90     | 80     | $0.01       |
+| pages-requests      | 10M           | 95     | 80     | $0.30       |
+| stream-minutes      | 1K            | 90     | 80     | $1,000      |
+
+## Config Interface
+
+```ts
+interface UsageGuardConfig {
+  kv: KVNamespace;           // KV namespace for state + alert dedup
+  accountId: string;         // Cloudflare account ID
+  apiToken: string;          // CF API token (Account Analytics: Read)
+  billingDay?: number;       // Day of month billing resets (default: 1)
+  thresholds?: Partial<Record<ResourceName, Partial<ResourceThreshold>>>;
+  alerts?: AlertChannel[];   // Discord, Slack, or custom handlers
+  alertTimeout?: number;     // Custom handler timeout in ms (default: 10000)
+  onEvaluate?: (event: EvaluateEvent) => void | Promise<void>;
+  dryRun?: boolean;          // Evaluate without tripping (default: false)
+  logger?: Logger;           // Optional { warn, error, debug } logger
+  keyPrefix?: string;        // KV key prefix (default: "cfug:")
+}
+
+interface ResourceThreshold {
+  limit?: number;            // Monthly included amount
+  warn?: number;             // Warning alert percentage (default: 80)
+  trip?: number | null;      // Trip percentage (default: 90, null = disabled)
+  recover?: number;          // Recovery percentage (default: trip - 5)
+  overageCost?: number;      // Cost per million over limit
+  tripAt?: number | null;    // Absolute unit count to trip at
+  maxOverageUsd?: number | null; // Dollar budget for overages
+}
+```
+
+## UsageGuard API
+
+| Method                                        | Description                                            |
+| --------------------------------------------- | ------------------------------------------------------ |
+| `isTripped(): Promise<boolean>`               | True if any resource is over its trip threshold         |
+| `isTripped(resource): Promise<boolean>`       | True if that specific resource is over threshold        |
+| `trippedResources(): Promise<ResourceName[]>` | List of all resources currently over threshold          |
+| `evaluate(): Promise<void>`                   | Full check: query CF API, evaluate, alert, cache state  |
+| `getState(): Promise<GuardState \| null>`     | Current cached state without querying CF                |
+| `trip(reason?): Promise<void>`                | Manually trip (does NOT auto-recover)                   |
+| `reset(): Promise<void>`                      | Manually reset                                          |
+
+## Proxy Factories
+
+| Function                              | Wraps            | Resources Checked                                  |
+| ------------------------------------- | ---------------- | -------------------------------------------------- |
+| `guardEnv(env, guard, opts?)`         | All bindings     | Auto-detected per binding                          |
+| `guardKV(kv, guard, opts?)`           | KVNamespace      | kv-reads, kv-writes, kv-deletes, kv-lists          |
+| `guardD1(db, guard, opts?)`           | D1Database       | d1-reads, d1-writes                                |
+| `guardR2(bucket, guard, opts?)`       | R2Bucket         | r2-class-a, r2-class-b                             |
+| `guardQueue(queue, guard, opts?)`     | Queue            | queue-operations                                   |
+| `guardAI(ai, guard, opts?)`           | Ai               | ai-neurons                                         |
+| `guardVectorize(index, guard, opts?)` | VectorizeIndex   | vectorize-queries                                  |
+| `guardVectorize(index, guard, opts?)` | VectorizeIndex   | vectorize-queries                                  |
+
+## Exports
+
+```ts
+// Functions
+export { createUsageGuard } from "cf-usage-guard";
+export { guardEnv, guardKV, guardD1, guardR2, guardQueue, guardAI, guardVectorize } from "cf-usage-guard";
+export { withUsageGuard } from "cf-usage-guard";
+export { DEFAULT_THRESHOLDS } from "cf-usage-guard";
+
+// Error class
+export { UsageGuardError } from "cf-usage-guard";
+
+// Constants
+export { RESOURCES, ALERT_LEVELS, ALERT_CHANNEL_TYPES, TRIP_REASONS, TRANSITIONS } from "cf-usage-guard";
+
+// Types
+export type {
+  UsageGuardConfig, UsageGuard, GuardState, ResourceName, ResourceStatus,
+  ResourceThreshold, AlertChannel, AlertEvent, EvaluateEvent, Logger,
+  WrapperConfig, AlertLevel, AlertChannelType, TripReason, Transition,
+} from "cf-usage-guard";
+```
+
+## Key Behaviors
+
+- **Fail-open**: If KV or the CF API is down, the guard defaults to "not tripped" so your app keeps running.
+- **Hysteresis**: Trip at threshold (default 90%), recover only when ALL resources drop below recover (default 85%). Prevents flapping.
+- **Alert dedup**: One alert per resource per billing period per level. Dedup markers only written on successful delivery.
+- **Safety net**: A separate KV key (`cfug:tripped`) survives state corruption and ensures the guard stays tripped even if the main state key is lost.
+- **Dry-run mode**: `dryRun: true` evaluates thresholds and fires `onEvaluate` but never writes state, trips, or sends alerts. Use this to test thresholds before going live.
+- **Manual overrides**: `guard.trip("reason")` and `guard.reset()` for incident management. Manual trips do NOT auto-recover.
