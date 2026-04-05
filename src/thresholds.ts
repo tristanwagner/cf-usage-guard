@@ -1,10 +1,18 @@
-import type { GuardState, ResolvedConfig, ResolvedThreshold, ResourceStatus } from "./types";
+import type {
+	BudgetStatus,
+	GuardState,
+	ResolvedBudget,
+	ResolvedConfig,
+	ResolvedThreshold,
+	ResourceStatus,
+} from "./types";
 
 export interface ThresholdResult {
 	shouldTrip: boolean;
 	shouldRecover: boolean;
 	warnResources: ResourceStatus[];
 	tripResources: ResourceStatus[];
+	budgetStatus: BudgetStatus | null;
 }
 
 export function isTrippable(t: ResolvedThreshold): boolean {
@@ -22,10 +30,28 @@ export function isOverThreshold(rs: ResourceStatus, t: ResolvedThreshold): boole
 	return false;
 }
 
+export function computeBudgetStatus(
+	resources: ResourceStatus[],
+	budget: ResolvedBudget,
+): BudgetStatus {
+	let totalOverageUsd = 0;
+	for (const r of resources) {
+		totalOverageUsd += r.estimatedOverage;
+	}
+	totalOverageUsd = Math.round(totalOverageUsd * 100) / 100;
+	const percent = budget.maxUsd > 0 ? (totalOverageUsd / budget.maxUsd) * 100 : 0;
+	return { totalOverageUsd, maxUsd: budget.maxUsd, percent };
+}
+
+export function isBudgetTripped(rs: ResourceStatus, budgetStatus: BudgetStatus): boolean {
+	return budgetStatus.percent >= 100 && rs.estimatedOverage > 0;
+}
+
 export function evaluateThresholds(
 	resources: ResourceStatus[],
 	config: ResolvedConfig,
 	currentState: GuardState | null,
+	budgetResources?: ResourceStatus[],
 ): ThresholdResult {
 	const isCurrentlyTripped = currentState?.tripped ?? false;
 
@@ -53,6 +79,32 @@ export function evaluateThresholds(
 		}
 	}
 
+	let budgetStatus: BudgetStatus | null = null;
+
+	if (config.budget) {
+		const budgetSource = budgetResources ?? resources;
+		budgetStatus = computeBudgetStatus(budgetSource, config.budget);
+		hasTrippableResource = true;
+
+		if (budgetStatus.percent >= 100) {
+			for (const resource of resources) {
+				if (resource.estimatedOverage > 0 && !tripResources.includes(resource)) {
+					tripResources.push(resource);
+				}
+			}
+			allTrippableBelowRecover = false;
+		} else if (budgetStatus.percent >= config.budget.warn) {
+			for (const resource of resources) {
+				if (resource.estimatedOverage > 0 && !warnResources.includes(resource)) {
+					warnResources.push(resource);
+				}
+			}
+			if (isCurrentlyTripped) {
+				allTrippableBelowRecover = false;
+			}
+		}
+	}
+
 	const shouldTrip = !isCurrentlyTripped && tripResources.length > 0;
 	const shouldRecover =
 		isCurrentlyTripped &&
@@ -60,5 +112,5 @@ export function evaluateThresholds(
 		hasTrippableResource &&
 		allTrippableBelowRecover;
 
-	return { shouldTrip, shouldRecover, warnResources, tripResources };
+	return { shouldTrip, shouldRecover, warnResources, tripResources, budgetStatus };
 }

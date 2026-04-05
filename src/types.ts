@@ -63,6 +63,24 @@ export interface ResourceThreshold {
 	granularity?: Granularity;
 }
 
+export interface BudgetConfig {
+	maxUsd: number;
+	warn?: number;
+	granularity?: Granularity;
+}
+
+export interface ResolvedBudget {
+	maxUsd: number;
+	warn: number;
+	granularity: Granularity;
+}
+
+export interface BudgetStatus {
+	totalOverageUsd: number;
+	maxUsd: number;
+	percent: number;
+}
+
 export type AlertChannel =
 	| { type: typeof ALERT_CHANNEL_TYPES.DISCORD; url: string }
 	| { type: typeof ALERT_CHANNEL_TYPES.SLACK; url: string }
@@ -104,6 +122,7 @@ export interface UsageGuardConfig {
 	apiToken: string;
 	billingDay?: number;
 	thresholds?: Partial<Record<ResourceName, Partial<ResourceThreshold>>>;
+	budget?: BudgetConfig;
 	alerts?: AlertChannel[];
 	logger?: Logger;
 	keyPrefix?: string;
@@ -132,6 +151,7 @@ export interface GuardState {
 	tripReason: TripReason | null;
 	manualTripReason: string | null;
 	resources: ResourceStatus[];
+	budget: BudgetStatus | null;
 	lastCheckAt: string;
 }
 
@@ -152,6 +172,7 @@ export interface ResolvedConfig {
 	apiToken: string;
 	billingDay: number;
 	thresholds: Record<ResourceName, ResolvedThreshold>;
+	budget: ResolvedBudget | null;
 	alerts: AlertChannel[];
 	logger: Logger;
 	keyPrefix: string;
@@ -171,6 +192,7 @@ export interface WrapperConfig<E> {
 	apiToken: (env: E) => string;
 	billingDay?: number;
 	thresholds?: Partial<Record<ResourceName, Partial<ResourceThreshold>>>;
+	budget?: BudgetConfig;
 	alerts?: (env: E) => AlertChannel[];
 	logger?: (env: E) => Logger;
 	keyPrefix?: string;

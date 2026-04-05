@@ -35,6 +35,7 @@ describe("isTripped", () => {
 			tripReason: "threshold",
 			manualTripReason: null,
 			resources: [],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(state));
@@ -56,6 +57,7 @@ describe("isTripped", () => {
 			tripReason: null,
 			manualTripReason: null,
 			resources: [],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(state));
@@ -88,6 +90,7 @@ describe("isTripped", () => {
 			tripReason: "threshold",
 			manualTripReason: null,
 			resources: [],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("myapp:state:v1", JSON.stringify(state));
@@ -134,6 +137,7 @@ describe("evaluate", () => {
 			tripReason: "threshold",
 			manualTripReason: null,
 			resources: [],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(trippedState));
@@ -160,6 +164,7 @@ describe("evaluate", () => {
 			tripReason: "threshold",
 			manualTripReason: null,
 			resources: [],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(existingState));
@@ -232,6 +237,7 @@ describe("evaluate", () => {
 			tripReason: "threshold",
 			manualTripReason: null,
 			resources: [],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(trippedState));
@@ -276,6 +282,7 @@ describe("evaluate", () => {
 			tripReason: "manual",
 			manualTripReason: null,
 			resources: [],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(existingState));
@@ -328,6 +335,7 @@ describe("getState", () => {
 			tripReason: null,
 			manualTripReason: null,
 			resources: [],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(state));
@@ -379,6 +387,7 @@ describe("trip", () => {
 					estimatedOverage: 0,
 				},
 			],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(state));
@@ -418,6 +427,7 @@ describe("reset", () => {
 			tripReason: "manual",
 			manualTripReason: null,
 			resources: [],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(state));
@@ -471,6 +481,7 @@ describe("isTripped (per-resource)", () => {
 					estimatedOverage: 0,
 				},
 			],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(state));
@@ -503,6 +514,7 @@ describe("isTripped (per-resource)", () => {
 					estimatedOverage: 0,
 				},
 			],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(state));
@@ -523,6 +535,7 @@ describe("isTripped (per-resource)", () => {
 			tripReason: null,
 			manualTripReason: null,
 			resources: [],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(state));
@@ -565,6 +578,7 @@ describe("trippedResources", () => {
 					estimatedOverage: 0,
 				},
 			],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(state));
@@ -675,6 +689,7 @@ describe("dry-run mode", () => {
 			tripReason: "threshold",
 			manualTripReason: null,
 			resources: [],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(state));
@@ -742,6 +757,7 @@ describe("dry-run mode", () => {
 			tripReason: "threshold",
 			manualTripReason: null,
 			resources: [],
+			budget: null,
 			lastCheckAt: "2026-04-10T00:00:00Z",
 		};
 		await kv.put("cfug:state:v1", JSON.stringify(trippedState));
@@ -903,5 +919,114 @@ describe("granularity-aware evaluate", () => {
 		const state = await guard.getState();
 		const kvWrites = state?.resources.find((r) => r.name === "kv-writes");
 		expect(kvWrites?.current).toBe(500_000);
+	});
+});
+
+describe("budget", () => {
+	it("persists budget status in state after evaluate", async () => {
+		setupFetchMock(
+			mockGraphQLResponse({ kvGroups: [{ actionType: "write", requests: 1_500_000 }] }),
+		);
+		const { guard } = makeGuard({ budget: { maxUsd: 50 } });
+
+		await guard.evaluate();
+
+		const state = await guard.getState();
+		expect(state?.budget).not.toBeNull();
+		expect(state?.budget?.totalOverageUsd).toBeGreaterThan(0);
+		expect(state?.budget?.maxUsd).toBe(50);
+	});
+
+	it("budget status is null when no budget configured", async () => {
+		setupFetchMock(mockGraphQLResponse());
+		const { guard } = makeGuard();
+
+		await guard.evaluate();
+
+		const state = await guard.getState();
+		expect(state?.budget).toBeNull();
+	});
+
+	it("trips when total overage exceeds budget maxUsd", async () => {
+		setupFetchMock(
+			mockGraphQLResponse({ kvGroups: [{ actionType: "write", requests: 3_000_000 }] }),
+		);
+		const { guard, kv } = makeGuard({
+			budget: { maxUsd: 5 },
+			thresholds: { "kv-writes": { trip: null } },
+		});
+
+		await guard.evaluate();
+
+		const state = JSON.parse((await kv.get("cfug:state:v1"))!) as GuardState;
+		expect(state.tripped).toBe(true);
+		expect(state.budget?.totalOverageUsd).toBeGreaterThanOrEqual(5);
+	});
+
+	it("does not trip when total overage is under budget", async () => {
+		setupFetchMock(
+			mockGraphQLResponse({ kvGroups: [{ actionType: "write", requests: 1_100_000 }] }),
+		);
+		const { guard } = makeGuard({
+			budget: { maxUsd: 50 },
+			thresholds: { "kv-writes": { trip: null } },
+		});
+
+		await guard.evaluate();
+
+		const state = await guard.getState();
+		expect(state?.tripped).toBe(false);
+	});
+
+	it("isTripped(resource) returns true for resource with overage when budget exceeded", async () => {
+		setupFetchMock(
+			mockGraphQLResponse({ kvGroups: [{ actionType: "write", requests: 3_000_000 }] }),
+		);
+		const { guard } = makeGuard({
+			budget: { maxUsd: 5 },
+			thresholds: { "kv-writes": { trip: null } },
+		});
+
+		await guard.evaluate();
+
+		expect(await guard.isTripped("kv-writes")).toBe(true);
+		expect(await guard.isTripped("d1-reads")).toBe(false);
+	});
+
+	it("trippedResources includes only resources with overage when budget exceeded", async () => {
+		setupFetchMock(
+			mockGraphQLResponse({ kvGroups: [{ actionType: "write", requests: 3_000_000 }] }),
+		);
+		const { guard } = makeGuard({
+			budget: { maxUsd: 5 },
+			thresholds: { "kv-writes": { trip: null } },
+		});
+
+		await guard.evaluate();
+
+		const tripped = await guard.trippedResources();
+		expect(tripped).toContain("kv-writes");
+		expect(tripped).not.toContain("d1-reads");
+	});
+
+	it("triggers weekly fetch when budget granularity is weekly", async () => {
+		let callCount = 0;
+		const fetchSpy = vi.fn(async () => {
+			callCount++;
+			return {
+				ok: true,
+				status: 200,
+				json: async () => mockGraphQLResponse(),
+			};
+		});
+		vi.stubGlobal("fetch", fetchSpy);
+
+		const { guard } = makeGuard({ budget: { maxUsd: 10, granularity: "weekly" } });
+		await guard.evaluate();
+
+		const graphqlCalls = fetchSpy.mock.calls.filter(
+			(c: unknown[]) => c[0] === "https://api.cloudflare.com/client/v4/graphql",
+		);
+		expect(graphqlCalls.length).toBeGreaterThanOrEqual(2);
 	});
 });

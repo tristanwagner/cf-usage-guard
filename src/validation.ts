@@ -1,6 +1,7 @@
 import {
 	GRANULARITIES,
 	RESOURCES,
+	type ResolvedBudget,
 	type ResolvedConfig,
 	type ResolvedThreshold,
 	type ResourceName,
@@ -229,12 +230,43 @@ export function validateAndResolve(config: UsageGuardConfig): ResolvedConfig {
 		apiToken: config.apiToken,
 		billingDay,
 		thresholds,
+		budget: resolveBudget(config),
 		alerts: config.alerts ?? [],
 		logger: config.logger ?? noopLogger,
 		keyPrefix,
 		alertTimeout,
 		onEvaluate: config.onEvaluate ?? null,
 		dryRun: config.dryRun ?? false,
+	};
+}
+
+const VALID_GRANULARITIES = new Set<string>(Object.values(GRANULARITIES));
+
+function resolveBudget(config: UsageGuardConfig): ResolvedBudget | null {
+	if (!config.budget) return null;
+
+	const { maxUsd, warn, granularity } = config.budget;
+
+	if (maxUsd <= 0) {
+		throw new Error(`Invalid budget: maxUsd (${maxUsd}) must be positive.`);
+	}
+
+	const resolvedWarn = warn ?? 80;
+	if (resolvedWarn < 0 || resolvedWarn > 100) {
+		throw new Error(`Invalid budget: warn (${resolvedWarn}) must be between 0 and 100.`);
+	}
+
+	const resolvedGranularity = granularity ?? GRANULARITIES.MONTHLY;
+	if (!VALID_GRANULARITIES.has(resolvedGranularity)) {
+		throw new Error(
+			`Invalid budget: granularity "${resolvedGranularity}" must be one of: ${[...VALID_GRANULARITIES].join(", ")}.`,
+		);
+	}
+
+	return {
+		maxUsd,
+		warn: resolvedWarn,
+		granularity: resolvedGranularity,
 	};
 }
 

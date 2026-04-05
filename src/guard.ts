@@ -6,10 +6,17 @@ import {
 	getDailyPeriod,
 	getWeeklyPeriod,
 } from "./query";
-import { evaluateThresholds, isOverThreshold, isTrippable } from "./thresholds";
+import {
+	computeBudgetStatus,
+	evaluateThresholds,
+	isBudgetTripped,
+	isOverThreshold,
+	isTrippable,
+} from "./thresholds";
 import {
 	ALERT_LEVELS,
 	type AlertLevel,
+	type BudgetStatus,
 	type EvaluateEvent,
 	type GuardState,
 	RESOURCES,
@@ -53,7 +60,7 @@ class UsageGuardImpl implements UsageGuard {
 		if (resource) {
 			if (state) {
 				const rs = state.resources.find((r) => r.name === resource);
-				if (rs) return this.isResourceTripped(rs);
+				if (rs) return this.isResourceTripped(rs, state.budget);
 			}
 			return this.isSafetyNetTripped(resource);
 		}
@@ -82,7 +89,7 @@ class UsageGuardImpl implements UsageGuard {
 		if (state) {
 			const result: ResourceName[] = [];
 			for (const rs of state.resources) {
-				if (this.isResourceTripped(rs)) {
+				if (this.isResourceTripped(rs, state.budget)) {
 					result.push(rs.name);
 				}
 			}
@@ -134,6 +141,7 @@ class UsageGuardImpl implements UsageGuard {
 						tripReason: TRIP_REASONS.THRESHOLD,
 						manualTripReason: null,
 						resources: [],
+						budget: null,
 						lastCheckAt: trippedVal,
 					};
 					this.config.logger.debug("Reconciled state from tripped safety net key");
@@ -144,8 +152,11 @@ class UsageGuardImpl implements UsageGuard {
 		}
 
 		let resources: ResourceStatus[];
+		let budgetResources: ResourceStatus[] | undefined;
 		try {
-			resources = await this.fetchMergedResources(now);
+			const fetched = await this.fetchMergedResources(now);
+			resources = fetched.resources;
+			budgetResources = fetched.budgetResources;
 		} catch (err) {
 			this.config.logger.error("CF API query failed, maintaining cached state", {
 				error: String(err),
@@ -153,23 +164,31 @@ class UsageGuardImpl implements UsageGuard {
 			return;
 		}
 
-		const result = evaluateThresholds(resources, this.config, currentState);
+		const result = evaluateThresholds(resources, this.config, currentState, budgetResources);
+		const budgetStatus = result.budgetStatus;
 		const period = getBillingPeriod(this.config.billingDay, now);
 		let transitioned: Transition | null = null;
 
 		if (this.config.dryRun) {
 			if (result.shouldTrip) transitioned = TRANSITIONS.TRIP;
 			else if (result.shouldRecover) transitioned = TRANSITIONS.RECOVER;
-			await this.fireDryRunOnEvaluate(resources, period, now, transitioned, currentState);
+			await this.fireDryRunOnEvaluate(
+				resources,
+				budgetStatus,
+				period,
+				now,
+				transitioned,
+				currentState,
+			);
 			return;
 		}
 
 		if (result.shouldTrip) {
-			await this.tripInternal(TRIP_REASONS.THRESHOLD, null, resources, now);
+			await this.tripInternal(TRIP_REASONS.THRESHOLD, null, resources, budgetStatus, now);
 			await this.alert(ALERT_LEVELS.TRIP, result.tripResources, period, now);
 			transitioned = TRANSITIONS.TRIP;
 		} else if (result.shouldRecover) {
-			await this.recoverInternal(resources, now);
+			await this.recoverInternal(resources, budgetStatus, now);
 			await this.alert(ALERT_LEVELS.RECOVER, resources, period, now);
 			transitioned = TRANSITIONS.RECOVER;
 		} else {
@@ -179,6 +198,7 @@ class UsageGuardImpl implements UsageGuard {
 				currentState?.tripReason ?? null,
 				currentState?.manualTripReason ?? null,
 				resources,
+				budgetStatus,
 				now,
 			);
 		}
@@ -210,6 +230,7 @@ class UsageGuardImpl implements UsageGuard {
 			TRIP_REASONS.MANUAL,
 			reason ?? null,
 			currentState?.resources ?? [],
+			currentState?.budget ?? null,
 			now,
 		);
 		this.config.logger.debug("Guard manually tripped", { reason });
@@ -218,7 +239,7 @@ class UsageGuardImpl implements UsageGuard {
 	async reset(): Promise<void> {
 		const now = new Date();
 		const currentState = await this.getState();
-		await this.recoverInternal(currentState?.resources ?? [], now);
+		await this.recoverInternal(currentState?.resources ?? [], currentState?.budget ?? null, now);
 		this.config.logger.debug("Guard manually reset");
 	}
 
@@ -226,9 +247,18 @@ class UsageGuardImpl implements UsageGuard {
 		tripReason: TripReason,
 		manualTripReason: string | null,
 		resources: ResourceStatus[],
+		budgetStatus: BudgetStatus | null,
 		now: Date,
 	): Promise<void> {
-		await this.saveState(true, now.toISOString(), tripReason, manualTripReason, resources, now);
+		await this.saveState(
+			true,
+			now.toISOString(),
+			tripReason,
+			manualTripReason,
+			resources,
+			budgetStatus,
+			now,
+		);
 
 		const ttl = billingPeriodRemainderSeconds(this.config.billingDay, now);
 		try {
@@ -240,8 +270,12 @@ class UsageGuardImpl implements UsageGuard {
 		}
 	}
 
-	private async recoverInternal(resources: ResourceStatus[], now: Date): Promise<void> {
-		await this.saveState(false, null, null, null, resources, now);
+	private async recoverInternal(
+		resources: ResourceStatus[],
+		budgetStatus: BudgetStatus | null,
+		now: Date,
+	): Promise<void> {
+		await this.saveState(false, null, null, null, resources, budgetStatus, now);
 
 		try {
 			await this.config.kv.delete(this.trippedKey());
@@ -256,6 +290,7 @@ class UsageGuardImpl implements UsageGuard {
 		tripReason: TripReason | null,
 		manualTripReason: string | null,
 		resources: ResourceStatus[],
+		budgetStatus: BudgetStatus | null,
 		now: Date,
 	): Promise<void> {
 		const state: GuardState = {
@@ -265,6 +300,7 @@ class UsageGuardImpl implements UsageGuard {
 			tripReason,
 			manualTripReason,
 			resources,
+			budget: budgetStatus,
 			lastCheckAt: now.toISOString(),
 		};
 
@@ -296,6 +332,7 @@ class UsageGuardImpl implements UsageGuard {
 
 	private async fireDryRunOnEvaluate(
 		resources: ResourceStatus[],
+		budgetStatus: BudgetStatus | null,
 		period: { start: string; end: string },
 		now: Date,
 		transitioned: Transition | null,
@@ -311,6 +348,7 @@ class UsageGuardImpl implements UsageGuard {
 			tripReason: wouldTrip ? TRIP_REASONS.THRESHOLD : (currentState?.tripReason ?? null),
 			manualTripReason: currentState?.manualTripReason ?? null,
 			resources,
+			budget: budgetStatus,
 			lastCheckAt: now.toISOString(),
 		};
 
@@ -353,11 +391,16 @@ class UsageGuardImpl implements UsageGuard {
 		}
 	}
 
-	private async fetchMergedResources(now: Date): Promise<ResourceStatus[]> {
-		const needsDaily = Object.values(this.config.thresholds).some((t) => t.granularity === "daily");
-		const needsWeekly = Object.values(this.config.thresholds).some(
-			(t) => t.granularity === "weekly",
-		);
+	private async fetchMergedResources(
+		now: Date,
+	): Promise<{ resources: ResourceStatus[]; budgetResources: ResourceStatus[] | undefined }> {
+		const budgetGranularity = this.config.budget?.granularity;
+		const needsDaily =
+			Object.values(this.config.thresholds).some((t) => t.granularity === "daily") ||
+			budgetGranularity === "daily";
+		const needsWeekly =
+			Object.values(this.config.thresholds).some((t) => t.granularity === "weekly") ||
+			budgetGranularity === "weekly";
 
 		const monthlyUsage = await fetchUsage(this.config, now);
 		const monthlyByName = new Map(monthlyUsage.resources.map((r) => [r.name, r]));
@@ -396,11 +439,21 @@ class UsageGuardImpl implements UsageGuard {
 			}
 		}
 
-		return merged;
+		let budgetResources: ResourceStatus[] | undefined;
+		if (budgetGranularity && budgetGranularity !== "monthly") {
+			const sourceMap = budgetGranularity === "daily" ? dailyByName : weeklyByName;
+			if (sourceMap) {
+				budgetResources = [...sourceMap.values()];
+			}
+		}
+
+		return { resources: merged, budgetResources };
 	}
 
-	private isResourceTripped(rs: ResourceStatus): boolean {
-		return isOverThreshold(rs, this.config.thresholds[rs.name]);
+	private isResourceTripped(rs: ResourceStatus, budgetStatus?: BudgetStatus | null): boolean {
+		if (isOverThreshold(rs, this.config.thresholds[rs.name])) return true;
+		if (budgetStatus) return isBudgetTripped(rs, budgetStatus);
+		return false;
 	}
 
 	private stateKey(): string {

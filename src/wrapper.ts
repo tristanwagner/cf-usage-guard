@@ -33,6 +33,7 @@ export function withUsageGuard<E>(
 				apiToken: wrapperConfig.apiToken(env),
 				billingDay: wrapperConfig.billingDay,
 				thresholds: wrapperConfig.thresholds,
+				budget: wrapperConfig.budget,
 				alerts: wrapperConfig.alerts?.(env),
 				logger: wrapperConfig.logger?.(env),
 				keyPrefix: wrapperConfig.keyPrefix,

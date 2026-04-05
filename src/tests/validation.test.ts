@@ -333,4 +333,57 @@ describe("validateAndResolve", () => {
 		expect(config.thresholds["ai-neurons"].granularity).toBe("monthly");
 		expect(config.thresholds["ai-neurons"].limit).toBe(300_000);
 	});
+
+	it("resolves budget to null when not provided", () => {
+		const config = validateAndResolve(baseConfig());
+		expect(config.budget).toBeNull();
+	});
+
+	it("resolves budget with defaults", () => {
+		const config = validateAndResolve({
+			...baseConfig(),
+			budget: { maxUsd: 10 },
+		});
+		expect(config.budget).toEqual({
+			maxUsd: 10,
+			warn: 80,
+			granularity: "monthly",
+		});
+	});
+
+	it("resolves budget with custom warn and granularity", () => {
+		const config = validateAndResolve({
+			...baseConfig(),
+			budget: { maxUsd: 25, warn: 50, granularity: "weekly" },
+		});
+		expect(config.budget).toEqual({
+			maxUsd: 25,
+			warn: 50,
+			granularity: "weekly",
+		});
+	});
+
+	it("throws on budget maxUsd <= 0", () => {
+		expect(() => validateAndResolve({ ...baseConfig(), budget: { maxUsd: 0 } })).toThrow(
+			"maxUsd (0) must be positive",
+		);
+	});
+
+	it("throws on negative budget maxUsd", () => {
+		expect(() => validateAndResolve({ ...baseConfig(), budget: { maxUsd: -5 } })).toThrow(
+			"maxUsd (-5) must be positive",
+		);
+	});
+
+	it("throws on budget warn < 0", () => {
+		expect(() => validateAndResolve({ ...baseConfig(), budget: { maxUsd: 10, warn: -1 } })).toThrow(
+			"warn (-1) must be between 0 and 100",
+		);
+	});
+
+	it("throws on budget warn > 100", () => {
+		expect(() =>
+			validateAndResolve({ ...baseConfig(), budget: { maxUsd: 10, warn: 101 } }),
+		).toThrow("warn (101) must be between 0 and 100");
+	});
 });

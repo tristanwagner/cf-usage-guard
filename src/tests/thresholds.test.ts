@@ -32,6 +32,7 @@ function trippedState(tripReason: "threshold" | "manual" = "threshold"): GuardSt
 		tripReason,
 		manualTripReason: null,
 		resources: [],
+		budget: null,
 		lastCheckAt: "2026-04-10T00:00:00Z",
 	};
 }
@@ -288,5 +289,148 @@ describe("evaluateThresholds", () => {
 		];
 		const result = evaluateThresholds(resources, config, trippedState());
 		expect(result.shouldRecover).toBe(false);
+	});
+});
+
+function budgetConfig(
+	budget: { maxUsd: number; warn?: number; granularity?: "daily" | "weekly" | "monthly" },
+	overrides?: Parameters<typeof resolvedConfig>[0],
+) {
+	return validateAndResolve({
+		kv: createMockKV(),
+		accountId: "test",
+		apiToken: "test",
+		thresholds: overrides,
+		budget,
+	});
+}
+
+function makeResourceWithOverage(
+	name: ResourceStatus["name"],
+	percent: number,
+	estimatedOverage: number,
+): ResourceStatus {
+	return {
+		name,
+		current: percent * 10_000,
+		limit: 1_000_000,
+		percent,
+		overageCost: 5,
+		estimatedOverage,
+	};
+}
+
+describe("evaluateThresholds with budget", () => {
+	it("returns budgetStatus as null when no budget configured", () => {
+		const resources = [makeResource("kv-writes", 50)];
+		const result = evaluateThresholds(resources, resolvedConfig(), null);
+		expect(result.budgetStatus).toBeNull();
+	});
+
+	it("computes budgetStatus when budget is configured", () => {
+		const config = budgetConfig({ maxUsd: 10 });
+		const resources = [makeResourceWithOverage("kv-writes", 150, 2.5)];
+		const result = evaluateThresholds(resources, config, null);
+		expect(result.budgetStatus).toEqual({ totalOverageUsd: 2.5, maxUsd: 10, percent: 25 });
+	});
+
+	it("trips resources with overage when total overage >= maxUsd", () => {
+		const config = budgetConfig({ maxUsd: 5 }, { "kv-writes": { trip: null } });
+		const resources = [
+			makeResourceWithOverage("kv-writes", 150, 3),
+			makeResourceWithOverage("d1-writes", 120, 3),
+			makeResourceWithOverage("d1-reads", 50, 0),
+		];
+		const result = evaluateThresholds(resources, config, null);
+		expect(result.shouldTrip).toBe(true);
+		expect(result.tripResources.map((r) => r.name)).toContain("kv-writes");
+		expect(result.tripResources.map((r) => r.name)).toContain("d1-writes");
+		expect(result.tripResources.map((r) => r.name)).not.toContain("d1-reads");
+	});
+
+	it("does not trip zero-overage resources when budget exceeded", () => {
+		const config = budgetConfig({ maxUsd: 1 }, { "kv-writes": { trip: null } });
+		const resources = [
+			makeResourceWithOverage("kv-writes", 150, 2),
+			makeResourceWithOverage("d1-reads", 10, 0),
+		];
+		const result = evaluateThresholds(resources, config, null);
+		expect(result.shouldTrip).toBe(true);
+		expect(result.tripResources).toHaveLength(1);
+		expect(result.tripResources[0].name).toBe("kv-writes");
+	});
+
+	it("warns resources with overage when total overage >= warn% of maxUsd", () => {
+		const config = budgetConfig({ maxUsd: 10, warn: 80 }, { "kv-writes": { trip: null } });
+		const resources = [makeResourceWithOverage("kv-writes", 150, 8.5)];
+		const result = evaluateThresholds(resources, config, null);
+		expect(result.shouldTrip).toBe(false);
+		expect(result.warnResources.map((r) => r.name)).toContain("kv-writes");
+	});
+
+	it("does not warn zero-overage resources when budget at warn level", () => {
+		const config = budgetConfig({ maxUsd: 10, warn: 80 }, { "kv-writes": { trip: null } });
+		const resources = [
+			makeResourceWithOverage("kv-writes", 150, 9),
+			makeResourceWithOverage("d1-reads", 10, 0),
+		];
+		const result = evaluateThresholds(resources, config, null);
+		expect(result.warnResources.map((r) => r.name)).not.toContain("d1-reads");
+	});
+
+	it("does not double-add resource already in tripResources from per-resource threshold", () => {
+		const config = budgetConfig({ maxUsd: 1 });
+		const resources = [makeResourceWithOverage("kv-writes", 95, 5)];
+		const result = evaluateThresholds(resources, config, null);
+		const kvCount = result.tripResources.filter((r) => r.name === "kv-writes").length;
+		expect(kvCount).toBe(1);
+	});
+
+	it("does not double-add resource already in warnResources", () => {
+		const config = budgetConfig({ maxUsd: 100, warn: 5 }, { "kv-writes": { trip: null } });
+		const resources = [makeResourceWithOverage("kv-writes", 85, 5.5)];
+		const result = evaluateThresholds(resources, config, null);
+		const kvCount = result.warnResources.filter((r) => r.name === "kv-writes").length;
+		expect(kvCount).toBe(1);
+	});
+
+	it("prevents recovery when budget is still at warn level", () => {
+		const config = budgetConfig({ maxUsd: 10, warn: 50 }, { "kv-writes": { trip: null } });
+		const resources = [makeResourceWithOverage("kv-writes", 50, 6)];
+		const result = evaluateThresholds(resources, config, trippedState());
+		expect(result.shouldRecover).toBe(false);
+	});
+
+	it("allows recovery when budget drops below warn threshold", () => {
+		const config = budgetConfig({ maxUsd: 10, warn: 80 }, { "kv-writes": { trip: null } });
+		const resources = [makeResourceWithOverage("kv-writes", 50, 1)];
+		const result = evaluateThresholds(resources, config, trippedState());
+		expect(result.shouldRecover).toBe(true);
+	});
+
+	it("does not trip when total overage is below maxUsd", () => {
+		const config = budgetConfig(
+			{ maxUsd: 10 },
+			{ "kv-writes": { trip: null }, "d1-writes": { trip: null } },
+		);
+		const resources = [
+			makeResourceWithOverage("kv-writes", 150, 3),
+			makeResourceWithOverage("d1-writes", 120, 2),
+		];
+		const result = evaluateThresholds(resources, config, null);
+		expect(result.shouldTrip).toBe(false);
+		expect(result.budgetStatus?.totalOverageUsd).toBe(5);
+	});
+
+	it("sums overage across all resources for budget check", () => {
+		const config = budgetConfig({ maxUsd: 10 }, { "kv-writes": { trip: null } });
+		const resources = [
+			makeResourceWithOverage("kv-writes", 150, 4),
+			makeResourceWithOverage("d1-writes", 120, 3),
+			makeResourceWithOverage("r2-class-a", 110, 3.5),
+		];
+		const result = evaluateThresholds(resources, config, null);
+		expect(result.shouldTrip).toBe(true);
+		expect(result.budgetStatus?.totalOverageUsd).toBe(10.5);
 	});
 });

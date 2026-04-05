@@ -34,11 +34,23 @@ When a user wants to add cf-usage-guard to their Cloudflare Worker, follow this 
 5. **Do you want to start in dry-run mode?**
    (`dryRun: true` -- evaluates thresholds and fires onEvaluate but never trips or writes state. Good for testing thresholds before going live.)
 
-6. **Do you want to customize any thresholds?**
+6. **Do you want to set a global spending limit?**
+   The `budget` option caps total overage cost across all resources. For example:
+   - `{ maxUsd: 10 }` -- trip when total monthly overage exceeds $10
+   - `{ maxUsd: 10, granularity: "weekly" }` -- trip when weekly overage exceeds $10
+   - Only resources actually generating overage costs get blocked; zero-overage resources stay open.
+   If they don't want a global cap, per-resource `maxOverageUsd` thresholds are also available.
+
+7. **Do you want the wrapper or inline methods?**
+   - `withUsageGuard` wrapper: simpler setup, best for straightforward Workers with fetch + scheduled handlers
+   - `createUsageGuard` + `guardEnv`/individual proxies: more control, better for complex Workers with multiple entry points or custom trip handling
+
+8. **Do you want to customize any thresholds?**
    Defaults are conservative (trip at 90%, warn at 80%). The user may want to:
    - Set dollar budgets: `maxOverageUsd: 5` on expensive resources
    - Set absolute caps: `tripAt: 900_000` on KV writes
    - Disable tripping for uncontrollable resources: `"workers-requests": { trip: null }`
+   - Change evaluation granularity: `"ai-neurons": { granularity: "daily" }` (already default for AI)
 
 ### Step 1b: Detect if they use Alchemy
 
@@ -123,6 +135,7 @@ export default withUsageGuard<Env>(
     apiToken: (env) => env.CF_API_TOKEN,
     evaluateCron: "*/5 * * * *",
     alerts: (env) => [{ type: "discord", url: env.DISCORD_WEBHOOK_URL }],
+    // budget: { maxUsd: 10, granularity: "weekly" }, // optional global spend cap
     // dryRun: true, // uncomment to test without tripping
   },
   {
@@ -165,6 +178,7 @@ export default {
       accountId: env.CF_ACCOUNT_ID,
       apiToken: env.CF_API_TOKEN,
       alerts: [{ type: "discord", url: env.DISCORD_WEBHOOK_URL }],
+      // budget: { maxUsd: 10 }, // optional global spend cap
       // dryRun: true, // uncomment to test without tripping
     });
 
@@ -214,6 +228,10 @@ Only generate threshold overrides for services the user actually uses. Examples:
 ```ts
 createUsageGuard({
   // ...required config...
+
+  // Global spend cap: trip when total overage exceeds $10/week
+  budget: { maxUsd: 10, granularity: "weekly" },
+
   thresholds: {
     // Dollar budget: trip when KV write overage exceeds $5
     "kv-writes": { maxOverageUsd: 5 },
@@ -228,7 +246,7 @@ createUsageGuard({
     "workers-requests": { trip: null },
 
     // Custom plan limits (if different from defaults)
-    "d1-reads": { limit: 50_000_000 },
+    "d1-reads": { limit: 50_000_000_000 },
   },
 });
 ```
@@ -257,27 +275,38 @@ Or use "skip" mode to silently drop operations:
 env = guardEnv(env, guard, { onTrip: "skip" });
 ```
 
+### Step 6: Suggest next actions
+
+After generating the configuration, remind the user of remaining manual steps:
+
+1. **Create the KV namespace** (if not already done): `wrangler kv namespace create USAGE_GUARD_KV`
+2. **Create the CF API token** with `Account Analytics: Read` permission at https://dash.cloudflare.com/profile/api-tokens
+3. **Add secrets** to the Worker: `wrangler secret put CF_API_TOKEN` (and webhook URLs if using alerts)
+4. **Add the cron trigger** to `wrangler.toml` if not already present
+5. **Deploy and test in dry-run mode** first (`dryRun: true`) -- check `onEvaluate` output or logs to verify thresholds look right
+6. **Disable dry-run** once satisfied with thresholds and go live
+
 ## Default Thresholds Reference
 
-| Resource            | Monthly Limit | Trip % | Warn % | Overage $/M |
-| ------------------- | ------------- | ------ | ------ | ----------- |
-| workers-requests    | 10M           | 95     | 80     | $0.30       |
-| workers-cpu         | 30B us        | 95     | 80     | $0.02       |
-| kv-reads            | 10M           | 90     | 80     | $0.50       |
-| kv-writes           | 1M            | 90     | 80     | $5.00       |
-| kv-deletes          | 1M            | 90     | 80     | $5.00       |
-| kv-lists            | 1M            | 90     | 80     | $5.00       |
-| d1-reads            | 25M           | 90     | 80     | $0.001      |
-| d1-writes           | 50M           | 90     | 80     | $1.00       |
-| r2-class-a          | 1M            | 90     | 80     | $4.50       |
-| r2-class-b          | 10M           | 95     | 80     | $0.36       |
-| queue-operations    | 1M            | 90     | 80     | $0.40       |
-| do-requests         | 1M            | 90     | 80     | $0.15       |
-| do-wall-time        | 400B us       | 90     | 80     | $12.50      |
-| ai-neurons          | 10M           | 90     | 80     | $0.011      |
-| vectorize-queries   | 30M           | 90     | 80     | $0.01       |
-| pages-requests      | 10M           | 95     | 80     | $0.30       |
-| stream-minutes      | 1K            | 90     | 80     | $1,000      |
+| Resource            | Included Limit | Trip % | Warn % | Overage $/M | Granularity |
+| ------------------- | -------------- | ------ | ------ | ----------- | ----------- |
+| workers-requests    | 10M            | 95     | 80     | $0.30       | monthly     |
+| workers-cpu         | 30B us         | 95     | 80     | $0.02       | monthly     |
+| kv-reads            | 10M            | 90     | 80     | $0.50       | monthly     |
+| kv-writes           | 1M             | 90     | 80     | $5.00       | monthly     |
+| kv-deletes          | 1M             | 90     | 80     | $5.00       | monthly     |
+| kv-lists            | 1M             | 90     | 80     | $5.00       | monthly     |
+| d1-reads            | 25B            | 90     | 80     | $0.001      | monthly     |
+| d1-writes           | 50M            | 90     | 80     | $1.00       | monthly     |
+| r2-class-a          | 1M             | 90     | 80     | $4.50       | monthly     |
+| r2-class-b          | 10M            | 95     | 80     | $0.36       | monthly     |
+| queue-operations    | 1M             | 90     | 80     | $0.40       | monthly     |
+| do-requests         | 1M             | 90     | 80     | $0.15       | monthly     |
+| do-wall-time        | 400B us        | 90     | 80     | $12.50      | monthly     |
+| ai-neurons          | 10K            | 90     | 80     | $0.011      | daily       |
+| vectorize-queries   | 50M            | 90     | 80     | $0.01       | monthly     |
+| pages-requests      | 10M            | 95     | 80     | $0.30       | monthly     |
+| stream-minutes      | 1K             | 90     | 80     | $1,000      | monthly     |
 
 ## Config Interface
 
@@ -288,6 +317,7 @@ interface UsageGuardConfig {
   apiToken: string;          // CF API token (Account Analytics: Read)
   billingDay?: number;       // Day of month billing resets (default: 1)
   thresholds?: Partial<Record<ResourceName, Partial<ResourceThreshold>>>;
+  budget?: BudgetConfig;     // Global spend cap across all resources
   alerts?: AlertChannel[];   // Discord, Slack, or custom handlers
   alertTimeout?: number;     // Custom handler timeout in ms (default: 10000)
   onEvaluate?: (event: EvaluateEvent) => void | Promise<void>;
@@ -296,14 +326,21 @@ interface UsageGuardConfig {
   keyPrefix?: string;        // KV key prefix (default: "cfug:")
 }
 
+interface BudgetConfig {
+  maxUsd: number;            // Trip when total overage exceeds this amount
+  warn?: number;             // Warning at % of maxUsd (default: 80)
+  granularity?: Granularity; // "daily" | "weekly" | "monthly" (default: "monthly")
+}
+
 interface ResourceThreshold {
-  limit?: number;            // Monthly included amount
+  limit?: number;            // Included amount for the period
   warn?: number;             // Warning alert percentage (default: 80)
   trip?: number | null;      // Trip percentage (default: 90, null = disabled)
   recover?: number;          // Recovery percentage (default: trip - 5)
   overageCost?: number;      // Cost per million over limit
   tripAt?: number | null;    // Absolute unit count to trip at
-  maxOverageUsd?: number | null; // Dollar budget for overages
+  maxOverageUsd?: number | null; // Dollar budget for per-resource overages
+  granularity?: Granularity; // "daily" | "weekly" | "monthly" (default: "monthly")
 }
 ```
 
@@ -345,12 +382,13 @@ export { DEFAULT_THRESHOLDS } from "cf-usage-guard";
 export { UsageGuardError } from "cf-usage-guard";
 
 // Constants
-export { RESOURCES, ALERT_LEVELS, ALERT_CHANNEL_TYPES, TRIP_REASONS, TRANSITIONS } from "cf-usage-guard";
+export { RESOURCES, GRANULARITIES, ALERT_LEVELS, ALERT_CHANNEL_TYPES, TRIP_REASONS, TRANSITIONS } from "cf-usage-guard";
 
 // Types
 export type {
   UsageGuardConfig, UsageGuard, GuardState, ResourceName, ResourceStatus,
-  ResourceThreshold, AlertChannel, AlertEvent, EvaluateEvent, Logger,
+  ResourceThreshold, BudgetConfig, BudgetStatus, ResolvedBudget, Granularity,
+  AlertChannel, AlertEvent, EvaluateEvent, Logger,
   WrapperConfig, AlertLevel, AlertChannelType, TripReason, Transition,
 } from "cf-usage-guard";
 ```
@@ -363,3 +401,5 @@ export type {
 - **Safety net**: A separate KV key (`cfug:tripped`) survives state corruption and ensures the guard stays tripped even if the main state key is lost.
 - **Dry-run mode**: `dryRun: true` evaluates thresholds and fires `onEvaluate` but never writes state, trips, or sends alerts. Use this to test thresholds before going live.
 - **Manual overrides**: `guard.trip("reason")` and `guard.reset()` for incident management. Manual trips do NOT auto-recover.
+- **Global budget**: `budget: { maxUsd: 10 }` trips only resources with overage > $0 when total overage exceeds the cap. Zero-overage resources stay open. Supports daily/weekly/monthly granularity.
+- **Per-resource granularity**: Each threshold can use `"daily"`, `"weekly"`, or `"monthly"` evaluation windows. Additional CF API queries are only issued when non-monthly granularities are configured.
