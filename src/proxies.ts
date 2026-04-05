@@ -230,17 +230,17 @@ function detectAndWrap(binding: unknown, guard: UsageGuard, opts?: ProxyOptions)
 	return binding;
 }
 
-export function guardEnv<E extends Record<string, unknown>>(
-	env: E,
-	guard: UsageGuard,
-	opts?: GuardEnvOptions,
-): E {
+export function guardEnv<E extends object>(env: E, guard: UsageGuard, opts?: GuardEnvOptions): E {
 	const exclude = new Set(opts?.exclude ?? []);
 	const result = { ...env };
 	for (const key of Object.keys(result)) {
 		if (exclude.has(key)) continue;
-		if (result[key] === guard.kv) continue;
-		(result as Record<string, unknown>)[key] = detectAndWrap(result[key], guard, opts);
+		if ((result as Record<string, unknown>)[key] === guard.kv) continue;
+		(result as Record<string, unknown>)[key] = detectAndWrap(
+			(result as Record<string, unknown>)[key],
+			guard,
+			opts,
+		);
 	}
 	return result as E;
 }
