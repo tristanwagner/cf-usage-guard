@@ -53,6 +53,25 @@ pnpm build          # Build dist/
 5. Add tests for the new channel
 6. Update README with configuration example
 
+## Publishing a Release
+
+Releases are published to npm automatically via GitHub Actions when a version tag is pushed.
+
+1. Update the version in `package.json` and commit:
+   ```bash
+   npm version <patch|minor|major>
+   ```
+   This bumps `package.json`, creates a commit, and tags it as `v<version>`.
+
+2. Push the commit and tag:
+   ```bash
+   git push origin master --follow-tags
+   ```
+
+3. The [release workflow](.github/workflows/release.yml) will run type checks, lint, tests, build, and publish to npm with OIDC provenance.
+
+> **Note:** Tags must be prefixed with `v` (e.g. `v0.3.0`). `npm version` does this by default.
+
 ## Reporting Issues
 
 Open an issue on GitHub with:
