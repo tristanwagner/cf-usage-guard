@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchUsage, getBillingPeriod, getBillingPeriodEnd } from "../query";
+import {
+	fetchUsage,
+	fetchUsageForPeriod,
+	getBillingPeriod,
+	getBillingPeriodEnd,
+	getDailyPeriod,
+	getWeeklyPeriod,
+} from "../query";
 import { validateAndResolve } from "../validation";
 import { createMockKV, mockGraphQLResponse, setupFetchMock } from "./helpers";
 
@@ -81,6 +88,111 @@ describe("getBillingPeriodEnd", () => {
 		const now = new Date("2026-12-15T00:00:00Z");
 		const end = getBillingPeriodEnd(1, now);
 		expect(end.toISOString().split("T")[0]).toBe("2027-01-01");
+	});
+});
+
+describe("getDailyPeriod", () => {
+	it("returns today's date range", () => {
+		const now = new Date("2026-04-15T14:30:00Z");
+		const period = getDailyPeriod(now);
+		expect(period.start).toBe("2026-04-15");
+		expect(period.end).toBe("2026-04-15");
+	});
+
+	it("handles midnight UTC", () => {
+		const now = new Date("2026-04-15T00:00:00Z");
+		const period = getDailyPeriod(now);
+		expect(period.start).toBe("2026-04-15");
+		expect(period.end).toBe("2026-04-15");
+	});
+
+	it("handles end of day", () => {
+		const now = new Date("2026-04-15T23:59:59Z");
+		const period = getDailyPeriod(now);
+		expect(period.start).toBe("2026-04-15");
+		expect(period.end).toBe("2026-04-15");
+	});
+});
+
+describe("getWeeklyPeriod", () => {
+	it("returns Monday-to-now range on a Wednesday", () => {
+		const now = new Date("2026-04-15T14:30:00Z");
+		const period = getWeeklyPeriod(now);
+		expect(period.start).toBe("2026-04-13");
+		expect(period.end).toBe("2026-04-15");
+	});
+
+	it("returns same day on Monday", () => {
+		const now = new Date("2026-04-13T10:00:00Z");
+		const period = getWeeklyPeriod(now);
+		expect(period.start).toBe("2026-04-13");
+		expect(period.end).toBe("2026-04-13");
+	});
+
+	it("returns previous Monday on Sunday", () => {
+		const now = new Date("2026-04-19T10:00:00Z");
+		const period = getWeeklyPeriod(now);
+		expect(period.start).toBe("2026-04-13");
+		expect(period.end).toBe("2026-04-19");
+	});
+
+	it("handles week crossing month boundary", () => {
+		const now = new Date("2026-05-01T10:00:00Z");
+		const period = getWeeklyPeriod(now);
+		expect(period.start).toBe("2026-04-27");
+		expect(period.end).toBe("2026-05-01");
+	});
+
+	it("handles week crossing year boundary", () => {
+		const now = new Date("2027-01-01T10:00:00Z");
+		const period = getWeeklyPeriod(now);
+		expect(period.start).toBe("2026-12-28");
+		expect(period.end).toBe("2027-01-01");
+	});
+});
+
+describe("fetchUsageForPeriod", () => {
+	function resolvedConfig() {
+		return validateAndResolve({
+			kv: createMockKV(),
+			accountId: "test-account",
+			apiToken: "test-token",
+		});
+	}
+
+	it("calls GraphQL with the provided period dates", async () => {
+		setupFetchMock(mockGraphQLResponse({ requests: 1_000 }));
+		const config = resolvedConfig();
+		const period = { start: "2026-04-15", end: "2026-04-15" };
+		const now = new Date("2026-04-15T14:30:00Z");
+
+		await fetchUsageForPeriod(config, period, now);
+
+		const call = vi.mocked(fetch).mock.calls[0];
+		const body = JSON.parse((call[1] as RequestInit).body as string);
+		expect(body.variables.since).toBe("2026-04-15");
+		expect(body.variables.until).toBe("2026-04-15");
+	});
+
+	it("returns parsed resources", async () => {
+		setupFetchMock(mockGraphQLResponse({ requests: 5_000 }));
+		const config = resolvedConfig();
+		const period = { start: "2026-04-15", end: "2026-04-15" };
+		const now = new Date("2026-04-15T14:30:00Z");
+
+		const result = await fetchUsageForPeriod(config, period, now);
+		const workers = result.resources.find((r) => r.name === "workers-requests");
+		expect(workers?.current).toBe(5_000);
+	});
+
+	it("throws on non-200 response", async () => {
+		setupFetchMock({}, 500);
+		const config = resolvedConfig();
+		const period = { start: "2026-04-15", end: "2026-04-15" };
+
+		await expect(
+			fetchUsageForPeriod(config, period, new Date("2026-04-15T00:00:00Z")),
+		).rejects.toThrow("CF GraphQL API returned 500");
 	});
 });
 

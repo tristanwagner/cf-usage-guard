@@ -1,4 +1,5 @@
 import {
+	GRANULARITIES,
 	RESOURCES,
 	type ResolvedConfig,
 	type ResolvedThreshold,
@@ -19,6 +20,7 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 0.3,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.WORKERS_CPU]: {
 			limit: 30_000_000_000,
@@ -28,6 +30,7 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 0.02,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.KV_READS]: {
 			limit: 10_000_000,
@@ -37,6 +40,7 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 0.5,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.KV_WRITES]: {
 			limit: 1_000_000,
@@ -46,6 +50,7 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 5.0,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.KV_DELETES]: {
 			limit: 1_000_000,
@@ -55,6 +60,7 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 5.0,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.KV_LISTS]: {
 			limit: 1_000_000,
@@ -64,15 +70,17 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 5.0,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.D1_READS]: {
-			limit: 25_000_000,
+			limit: 25_000_000_000,
 			warn: 80,
 			trip: 90,
 			recover: 85,
 			overageCost: 0.001,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.D1_WRITES]: {
 			limit: 50_000_000,
@@ -82,6 +90,7 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 1.0,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.R2_CLASS_A]: {
 			limit: 1_000_000,
@@ -91,6 +100,7 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 4.5,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.R2_CLASS_B]: {
 			limit: 10_000_000,
@@ -100,6 +110,7 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 0.36,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.QUEUE_OPERATIONS]: {
 			limit: 1_000_000,
@@ -109,6 +120,7 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 0.4,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.DO_REQUESTS]: {
 			limit: 1_000_000,
@@ -118,6 +130,7 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 0.15,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.DO_WALL_TIME]: {
 			limit: 400_000_000_000,
@@ -127,24 +140,27 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 12.5,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.AI_NEURONS]: {
-			limit: 10_000_000,
+			limit: 10_000,
 			warn: 80,
 			trip: 90,
 			recover: 85,
 			overageCost: 0.011,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.DAILY,
 		},
 		[RESOURCES.VECTORIZE_QUERIES]: {
-			limit: 30_000_000,
+			limit: 50_000_000,
 			warn: 80,
 			trip: 90,
 			recover: 85,
 			overageCost: 0.01,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.PAGES_REQUESTS]: {
 			limit: 10_000_000,
@@ -154,6 +170,7 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 0.3,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 		[RESOURCES.STREAM_MINUTES]: {
 			limit: 1_000,
@@ -163,6 +180,7 @@ export const DEFAULT_THRESHOLDS: Readonly<Record<ResourceName, Readonly<Resolved
 			overageCost: 1000,
 			tripAt: null,
 			maxOverageUsd: null,
+			granularity: GRANULARITIES.MONTHLY,
 		},
 	});
 
@@ -234,6 +252,7 @@ function mergeThreshold(
 		tripAt: override.tripAt !== undefined ? override.tripAt : base.tripAt,
 		maxOverageUsd:
 			override.maxOverageUsd !== undefined ? override.maxOverageUsd : base.maxOverageUsd,
+		granularity: override.granularity ?? base.granularity,
 	};
 
 	if (merged.warn < 0 || merged.warn > 100) {

@@ -814,3 +814,94 @@ describe("safety net protects per-resource checks", () => {
 		expect(tripped.length).toBeGreaterThan(10);
 	});
 });
+
+describe("granularity-aware evaluate", () => {
+	it("issues 2 GraphQL requests when daily resources exist (default ai-neurons)", async () => {
+		const fetchSpy = vi.fn(async () => ({
+			ok: true,
+			status: 200,
+			json: async () => mockGraphQLResponse(),
+		}));
+		vi.stubGlobal("fetch", fetchSpy);
+
+		const { guard } = makeGuard();
+		await guard.evaluate();
+
+		const graphqlCalls = fetchSpy.mock.calls.filter((c) => (c[0] as string).includes("graphql"));
+		expect(graphqlCalls).toHaveLength(2);
+	});
+
+	it("issues 1 GraphQL request when all resources are monthly", async () => {
+		const fetchSpy = vi.fn(async () => ({
+			ok: true,
+			status: 200,
+			json: async () => mockGraphQLResponse(),
+		}));
+		vi.stubGlobal("fetch", fetchSpy);
+
+		const { guard } = makeGuard({
+			thresholds: { "ai-neurons": { granularity: "monthly", limit: 300_000 } },
+		});
+		await guard.evaluate();
+
+		const graphqlCalls = fetchSpy.mock.calls.filter((c) => (c[0] as string).includes("graphql"));
+		expect(graphqlCalls).toHaveLength(1);
+	});
+
+	it("issues 3 GraphQL requests when daily and weekly resources exist", async () => {
+		const fetchSpy = vi.fn(async () => ({
+			ok: true,
+			status: 200,
+			json: async () => mockGraphQLResponse(),
+		}));
+		vi.stubGlobal("fetch", fetchSpy);
+
+		const { guard } = makeGuard({
+			thresholds: { "kv-writes": { granularity: "weekly" } },
+		});
+		await guard.evaluate();
+
+		const graphqlCalls = fetchSpy.mock.calls.filter((c) => (c[0] as string).includes("graphql"));
+		expect(graphqlCalls).toHaveLength(3);
+	});
+
+	it("uses daily usage values for daily-granularity resources", async () => {
+		let callCount = 0;
+		const fetchSpy = vi.fn(async () => {
+			callCount++;
+			const data =
+				callCount === 1
+					? mockGraphQLResponse({ aiNeurons: 999_999 })
+					: mockGraphQLResponse({ aiNeurons: 5_000 });
+			return { ok: true, status: 200, json: async () => data };
+		});
+		vi.stubGlobal("fetch", fetchSpy);
+
+		const { guard } = makeGuard();
+		await guard.evaluate();
+
+		const state = await guard.getState();
+		const aiNeurons = state?.resources.find((r) => r.name === "ai-neurons");
+		expect(aiNeurons?.current).toBe(5_000);
+	});
+
+	it("uses monthly usage values for monthly-granularity resources even when daily fetch occurs", async () => {
+		let callCount = 0;
+		const fetchSpy = vi.fn(async () => {
+			callCount++;
+			const data =
+				callCount === 1
+					? mockGraphQLResponse({ kvGroups: [{ actionType: "write", requests: 500_000 }] })
+					: mockGraphQLResponse({ kvGroups: [{ actionType: "write", requests: 100 }] });
+			return { ok: true, status: 200, json: async () => data };
+		});
+		vi.stubGlobal("fetch", fetchSpy);
+
+		const { guard } = makeGuard();
+		await guard.evaluate();
+
+		const state = await guard.getState();
+		const kvWrites = state?.resources.find((r) => r.name === "kv-writes");
+		expect(kvWrites?.current).toBe(500_000);
+	});
+});

@@ -14,6 +14,7 @@ export { withUsageGuard } from "./wrapper";
 export {
 	ALERT_CHANNEL_TYPES,
 	ALERT_LEVELS,
+	GRANULARITIES,
 	RESOURCES,
 	TRANSITIONS,
 	TRIP_REASONS,
@@ -22,6 +23,7 @@ export {
 	type AlertEvent,
 	type AlertLevel,
 	type EvaluateEvent,
+	type Granularity,
 	type GuardState,
 	type Logger,
 	type ResourceName,

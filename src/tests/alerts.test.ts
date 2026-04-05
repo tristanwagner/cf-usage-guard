@@ -368,6 +368,96 @@ describe("sendAlerts", () => {
 			expect.any(Object),
 		);
 	});
+
+	it("uses daily date in dedup key for daily-granularity resources", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => ({ ok: true, status: 200 })),
+		);
+		const kv = createMockKV();
+
+		const config = makeConfig({
+			kv,
+			alerts: [{ type: "discord", url: "https://discord.example.com/webhook" }],
+			thresholds: { "ai-neurons": { granularity: "daily", limit: 10_000 } },
+		});
+
+		const event = makeEvent({
+			resources: [
+				{
+					name: "ai-neurons",
+					current: 9_000,
+					limit: 10_000,
+					percent: 90,
+					overageCost: 0.011,
+					estimatedOverage: 0,
+				},
+			],
+		});
+
+		await sendAlerts(event, config, new Date("2026-04-15T14:30:00Z"));
+
+		expect(kv.put).toHaveBeenCalledWith(
+			expect.stringContaining("2026-04-15"),
+			expect.any(String),
+			expect.any(Object),
+		);
+	});
+
+	it("uses weekly start date in dedup key for weekly-granularity resources", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => ({ ok: true, status: 200 })),
+		);
+		const kv = createMockKV();
+
+		const config = makeConfig({
+			kv,
+			alerts: [{ type: "discord", url: "https://discord.example.com/webhook" }],
+			thresholds: { "kv-writes": { granularity: "weekly" } },
+		});
+
+		await sendAlerts(makeEvent(), config, new Date("2026-04-15T14:30:00Z"));
+
+		expect(kv.put).toHaveBeenCalledWith(
+			expect.stringContaining("2026-04-13"),
+			expect.any(String),
+			expect.any(Object),
+		);
+	});
+
+	it("deduplicates daily alerts within same day but not across days", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => ({ ok: true, status: 200 })),
+		);
+		const kv = createMockKV();
+
+		const config = makeConfig({
+			kv,
+			alerts: [{ type: "discord", url: "https://discord.example.com/webhook" }],
+			thresholds: { "ai-neurons": { granularity: "daily", limit: 10_000 } },
+		});
+
+		const event = makeEvent({
+			resources: [
+				{
+					name: "ai-neurons",
+					current: 9_000,
+					limit: 10_000,
+					percent: 90,
+					overageCost: 0.011,
+					estimatedOverage: 0,
+				},
+			],
+		});
+
+		await sendAlerts(event, config, new Date("2026-04-15T10:00:00Z"));
+		expect(fetch).toHaveBeenCalledTimes(1);
+
+		await sendAlerts(event, config, new Date("2026-04-15T14:00:00Z"));
+		expect(fetch).toHaveBeenCalledTimes(1);
+	});
 });
 
 describe("formatResourceLines", () => {

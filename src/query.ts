@@ -180,9 +180,30 @@ function formatDate(d: Date): string {
 	return d.toISOString().split("T")[0];
 }
 
+export function getDailyPeriod(now: Date): { start: string; end: string } {
+	const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+	return { start: formatDate(todayStart), end: formatDate(now) };
+}
+
+export function getWeeklyPeriod(now: Date): { start: string; end: string } {
+	const day = now.getUTCDay();
+	const diffToMonday = day === 0 ? 6 : day - 1;
+	const monday = new Date(
+		Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - diffToMonday),
+	);
+	return { start: formatDate(monday), end: formatDate(now) };
+}
+
 export async function fetchUsage(config: ResolvedConfig, now: Date): Promise<UsageData> {
 	const period = getBillingPeriod(config.billingDay, now);
+	return fetchUsageForPeriod(config, period, now);
+}
 
+export async function fetchUsageForPeriod(
+	config: ResolvedConfig,
+	period: { start: string; end: string },
+	now: Date,
+): Promise<UsageData> {
 	const response = await fetch(CF_GRAPHQL_URL, {
 		method: "POST",
 		headers: {

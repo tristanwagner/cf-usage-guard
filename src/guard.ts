@@ -1,5 +1,11 @@
 import { billingPeriodRemainderSeconds, sendAlerts } from "./alerts";
-import { fetchUsage, getBillingPeriod } from "./query";
+import {
+	fetchUsage,
+	fetchUsageForPeriod,
+	getBillingPeriod,
+	getDailyPeriod,
+	getWeeklyPeriod,
+} from "./query";
 import { evaluateThresholds, isOverThreshold, isTrippable } from "./thresholds";
 import {
 	ALERT_LEVELS,
@@ -139,8 +145,7 @@ class UsageGuardImpl implements UsageGuard {
 
 		let resources: ResourceStatus[];
 		try {
-			const usage = await fetchUsage(this.config, now);
-			resources = usage.resources;
+			resources = await this.fetchMergedResources(now);
 		} catch (err) {
 			this.config.logger.error("CF API query failed, maintaining cached state", {
 				error: String(err),
@@ -346,6 +351,52 @@ class UsageGuardImpl implements UsageGuard {
 				error: String(err),
 			});
 		}
+	}
+
+	private async fetchMergedResources(now: Date): Promise<ResourceStatus[]> {
+		const needsDaily = Object.values(this.config.thresholds).some((t) => t.granularity === "daily");
+		const needsWeekly = Object.values(this.config.thresholds).some(
+			(t) => t.granularity === "weekly",
+		);
+
+		const monthlyUsage = await fetchUsage(this.config, now);
+		const monthlyByName = new Map(monthlyUsage.resources.map((r) => [r.name, r]));
+
+		let dailyByName: Map<ResourceName, ResourceStatus> | null = null;
+		if (needsDaily) {
+			const dailyPeriod = getDailyPeriod(now);
+			const dailyUsage = await fetchUsageForPeriod(this.config, dailyPeriod, now);
+			dailyByName = new Map(dailyUsage.resources.map((r) => [r.name, r]));
+		}
+
+		let weeklyByName: Map<ResourceName, ResourceStatus> | null = null;
+		if (needsWeekly) {
+			const weeklyPeriod = getWeeklyPeriod(now);
+			const weeklyUsage = await fetchUsageForPeriod(this.config, weeklyPeriod, now);
+			weeklyByName = new Map(weeklyUsage.resources.map((r) => [r.name, r]));
+		}
+
+		const merged: ResourceStatus[] = [];
+		for (const [name, threshold] of Object.entries(this.config.thresholds)) {
+			const resourceName = name as ResourceName;
+			let source: ResourceStatus | undefined;
+
+			if (threshold.granularity === "daily" && dailyByName) {
+				source = dailyByName.get(resourceName);
+			} else if (threshold.granularity === "weekly" && weeklyByName) {
+				source = weeklyByName.get(resourceName);
+			}
+
+			if (!source) {
+				source = monthlyByName.get(resourceName);
+			}
+
+			if (source) {
+				merged.push(source);
+			}
+		}
+
+		return merged;
 	}
 
 	private isResourceTripped(rs: ResourceStatus): boolean {

@@ -296,11 +296,41 @@ describe("validateAndResolve", () => {
 		const config = validateAndResolve(baseConfig());
 		expect(config.thresholds["do-requests"].limit).toBe(1_000_000);
 		expect(config.thresholds["do-wall-time"].limit).toBe(400_000_000_000);
-		expect(config.thresholds["ai-neurons"].limit).toBe(10_000_000);
+		expect(config.thresholds["ai-neurons"].limit).toBe(10_000);
 		expect(config.thresholds["ai-neurons"].trip).toBe(90);
-		expect(config.thresholds["vectorize-queries"].limit).toBe(30_000_000);
+		expect(config.thresholds["ai-neurons"].granularity).toBe("daily");
+		expect(config.thresholds["vectorize-queries"].limit).toBe(50_000_000);
 		expect(config.thresholds["pages-requests"].limit).toBe(10_000_000);
 		expect(config.thresholds["stream-minutes"].limit).toBe(1_000);
 		expect(config.thresholds["stream-minutes"].trip).toBe(90);
+		expect(config.thresholds["d1-reads"].limit).toBe(25_000_000_000);
+	});
+
+	it("defaults all resources to monthly granularity except ai-neurons", () => {
+		const config = validateAndResolve(baseConfig());
+		for (const [name, threshold] of Object.entries(config.thresholds)) {
+			if (name === "ai-neurons") {
+				expect(threshold.granularity).toBe("daily");
+			} else {
+				expect(threshold.granularity).toBe("monthly");
+			}
+		}
+	});
+
+	it("allows overriding granularity", () => {
+		const config = validateAndResolve({
+			...baseConfig(),
+			thresholds: { "kv-writes": { granularity: "weekly" } },
+		});
+		expect(config.thresholds["kv-writes"].granularity).toBe("weekly");
+	});
+
+	it("allows overriding ai-neurons to monthly granularity", () => {
+		const config = validateAndResolve({
+			...baseConfig(),
+			thresholds: { "ai-neurons": { granularity: "monthly", limit: 300_000 } },
+		});
+		expect(config.thresholds["ai-neurons"].granularity).toBe("monthly");
+		expect(config.thresholds["ai-neurons"].limit).toBe(300_000);
 	});
 });

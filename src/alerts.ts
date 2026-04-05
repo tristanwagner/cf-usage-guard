@@ -1,8 +1,10 @@
+import { getDailyPeriod, getWeeklyPeriod } from "./query";
 import {
 	ALERT_CHANNEL_TYPES,
 	ALERT_LEVELS,
 	type AlertChannel,
 	type AlertEvent,
+	type Granularity,
 	type ResolvedConfig,
 	type ResourceStatus,
 } from "./types";
@@ -15,7 +17,7 @@ export async function sendAlerts(
 	if (config.alerts.length === 0) return;
 
 	if (event.level !== ALERT_LEVELS.RECOVER) {
-		const isDuplicate = await checkDedup(event, config);
+		const isDuplicate = await checkDedup(event, config, now);
 		if (isDuplicate) {
 			config.logger.debug("Alert deduplicated", { level: event.level });
 			return;
@@ -42,8 +44,8 @@ export async function sendAlerts(
 	}
 }
 
-async function checkDedup(event: AlertEvent, config: ResolvedConfig): Promise<boolean> {
-	const key = dedupKey(event, config);
+async function checkDedup(event: AlertEvent, config: ResolvedConfig, now: Date): Promise<boolean> {
+	const key = dedupKey(event, config, now);
 	try {
 		const existing = await config.kv.get(key);
 		return existing !== null;
@@ -54,8 +56,8 @@ async function checkDedup(event: AlertEvent, config: ResolvedConfig): Promise<bo
 }
 
 async function writeDedup(event: AlertEvent, config: ResolvedConfig, now: Date): Promise<void> {
-	const key = dedupKey(event, config);
-	const ttl = billingPeriodRemainderSeconds(config.billingDay, now);
+	const key = dedupKey(event, config, now);
+	const ttl = dedupTtl(event, config, now);
 	try {
 		await config.kv.put(key, now.toISOString(), {
 			expirationTtl: Math.max(60, ttl),
@@ -65,11 +67,39 @@ async function writeDedup(event: AlertEvent, config: ResolvedConfig, now: Date):
 	}
 }
 
-function dedupKey(event: AlertEvent, config: ResolvedConfig): string {
-	const period = event.billingPeriod.start.slice(0, 7);
+function resourceGranularity(event: AlertEvent, config: ResolvedConfig): Granularity {
+	const resourceName = event.resources[0]?.name;
+	if (!resourceName) return "monthly";
+	return config.thresholds[resourceName]?.granularity ?? "monthly";
+}
+
+function dedupPeriodKey(granularity: Granularity, event: AlertEvent, now: Date): string {
+	if (granularity === "daily") {
+		return getDailyPeriod(now).start;
+	}
+	if (granularity === "weekly") {
+		return getWeeklyPeriod(now).start;
+	}
+	return event.billingPeriod.start.slice(0, 7);
+}
+
+function dedupTtl(event: AlertEvent, config: ResolvedConfig, now: Date): number {
 	if (event.level === ALERT_LEVELS.TRIP) {
+		return billingPeriodRemainderSeconds(config.billingDay, now);
+	}
+	const granularity = resourceGranularity(event, config);
+	if (granularity === "daily") return 48 * 3600;
+	if (granularity === "weekly") return 8 * 86400;
+	return billingPeriodRemainderSeconds(config.billingDay, now);
+}
+
+function dedupKey(event: AlertEvent, config: ResolvedConfig, now: Date): string {
+	if (event.level === ALERT_LEVELS.TRIP) {
+		const period = event.billingPeriod.start.slice(0, 7);
 		return `${config.keyPrefix}alert:${ALERT_LEVELS.TRIP}:global:${period}`;
 	}
+	const granularity = resourceGranularity(event, config);
+	const period = dedupPeriodKey(granularity, event, now);
 	const resourceName = event.resources[0]?.name ?? "unknown";
 	return `${config.keyPrefix}alert:${event.level}:${resourceName}:${period}`;
 }

@@ -19,6 +19,13 @@ export const RESOURCES = {
 } as const;
 export type ResourceName = (typeof RESOURCES)[keyof typeof RESOURCES];
 
+export const GRANULARITIES = {
+	DAILY: "daily",
+	WEEKLY: "weekly",
+	MONTHLY: "monthly",
+} as const;
+export type Granularity = (typeof GRANULARITIES)[keyof typeof GRANULARITIES];
+
 export const ALERT_LEVELS = {
 	WARN: "warn",
 	TRIP: "trip",
@@ -53,6 +60,7 @@ export interface ResourceThreshold {
 	overageCost?: number;
 	tripAt?: number | null;
 	maxOverageUsd?: number | null;
+	granularity?: Granularity;
 }
 
 export type AlertChannel =
@@ -135,6 +143,7 @@ export interface ResolvedThreshold {
 	overageCost: number;
 	tripAt: number | null;
 	maxOverageUsd: number | null;
+	granularity: Granularity;
 }
 
 export interface ResolvedConfig {
