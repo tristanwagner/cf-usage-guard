@@ -1,6 +1,6 @@
 {
 	"name": "cf-usage-guard",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Automatic usage protection for Cloudflare Workers. Monitors account-level resource consumption, trips a guard before you hit billing overages, and sends alerts via Discord/Slack/custom webhooks.",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -12,7 +12,12 @@
 			"import": "./dist/index.js"
 		}
 	},
-	"files": ["dist", "README.md", "LICENSE", "llms.txt"],
+	"files": [
+		"dist",
+		"README.md",
+		"LICENSE",
+		"llms.txt"
+	],
 	"scripts": {
 		"build": "tsc",
 		"check": "biome check src/",
